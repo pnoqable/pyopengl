@@ -9,18 +9,19 @@ import sys
 import time
 
 vertex_shader = """#version 150 core
-    in float inValue;
-    out float outValue;
+    in vec3 inValue;
+    out vec3 outValue;
 
-    uniform float base[baseCount];
+    uniform vec3 base[baseCount];
     uniform int count;
 
     void main() {
-        outValue = 0.;
+        outValue = vec3( 0., 0., 0 );
         for( int i = 0; i < count; i++ ) {
-            float result = inValue - base[i];
-            if( result != 0. )
-                outValue += result / result / result / result;
+            vec3 result = inValue - base[i];
+            float sqrLen = dot( result, result );
+            if( sqrLen != 0. )
+                outValue += result / sqrt( sqrLen ) / sqrLen;
         }
     }
 """
@@ -28,7 +29,7 @@ vertex_shader = """#version 150 core
 @pygamegltest.pygametest(name="Geometry Shader Test")
 def main( nPoints, nFrames ):
 
-    maxBaseLen = glGetInteger( GL_MAX_VERTEX_UNIFORM_VECTORS ) * 4 - 1
+    maxBaseLen = glGetInteger( GL_MAX_VERTEX_UNIFORM_VECTORS ) - 1
     print( "baseCount on this machine: " + str( maxBaseLen ) )
 
     shader = glCreateShader( GL_VERTEX_SHADER )
@@ -57,8 +58,8 @@ def main( nPoints, nFrames ):
     vao = glGenVertexArrays( 1 )
     glBindVertexArray( vao )
 
-    data = np.arange( nPoints, dtype='float32' )
-    print( str( data[:5] ) )
+    data = np.arange( 3 * nPoints, dtype='float32' ).reshape( ( nPoints, 3 ) )
+    print( str( data[0] ) )
     
     vbo = glGenBuffers( 1 )
     glBindBuffer( GL_ARRAY_BUFFER, vbo )
@@ -68,10 +69,10 @@ def main( nPoints, nFrames ):
     glEnableVertexAttribArray( inputAttrib )
 
     # Note the need to cast 0 to a GLvoidp here!
-    glVertexAttribPointer( inputAttrib, 1, GL_FLOAT, GL_FALSE, 0, GLvoidp( 0 ) )
+    glVertexAttribPointer( inputAttrib, 3, GL_FLOAT, GL_FALSE, 0, GLvoidp( 0 ) )
     
     nResults = int( np.ceil( nPoints / maxBaseLen ) )
-    feedback = np.empty( ( nResults, nPoints ), dtype = 'float32' )
+    feedback = np.empty( ( nResults, nPoints, 3 ), dtype = 'float32' )
 
     tbo = glGenBuffers( 1 )
     glBindBuffer( GL_ARRAY_BUFFER, tbo )
@@ -99,7 +100,7 @@ def main( nPoints, nFrames ):
 
         glBeginTransformFeedback(GL_POINTS)
         for base in np.array_split( data, nResults ):
-            glUniform1fv( uniBase, base.shape[0], base )
+            glUniform3fv( uniBase, base.shape[0], base )
             glUniform1i( uniCount, base.shape[0] )
             glDrawArrays( GL_POINTS, 0, data.shape[0] )
         glEndTransformFeedback()
@@ -114,9 +115,9 @@ def main( nPoints, nFrames ):
         feedbackTick = now()
 
         delta = feedback.sum( axis = 0 ) / 1000
-        print( str( delta[:5] ) )
+        print( str( delta[0] ) )
         data[:] += delta
-        print( str( data[:5] ), end = "\t" )
+        print( str( data[0] ), end = "\t" )
         sumTick = now()
 
         uploadTime = ms( frameTick, uploadTick )
