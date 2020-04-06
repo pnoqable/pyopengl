@@ -8,17 +8,19 @@ import re
 import sys
 import time
 
-vertex_shader = """#version 150 core
-    in vec3 inValue;
-    out vec3 outValue;
+shaderSource = """#version 150 core
+    uniform int baseCount;
+    uniform Base {
+        vec4 base[maxBaseCount];
+    };
 
-    uniform vec3 base[baseCount];
-    uniform int count;
+    in vec4 inValue;
+    out vec4 outValue;
 
     void main() {
-        outValue = vec3( 0., 0., 0 );
-        for( int i = 0; i < count; i++ ) {
-            vec3 result = inValue - base[i];
+        outValue = vec4( 0., 0., 0., 0. );
+        for( int i = 0; i < baseCount; i++ ) {
+            vec4 result = inValue - base[i];
             float sqrLen = dot( result, result );
             if( sqrLen != 0. )
                 outValue += result / sqrt( sqrLen ) / sqrLen;
@@ -26,40 +28,75 @@ vertex_shader = """#version 150 core
     }
 """
 
-@pygamegltest.pygametest(name="Geometry Shader Test")
-def main( nPoints, nFrames ):
+shaderSource2 = """#version 150 core
+    uniform int summandsCount;
 
-    maxBaseLen = glGetInteger( GL_MAX_VERTEX_UNIFORM_VECTORS ) - 1
-    print( "baseCount on this machine: " + str( maxBaseLen ) )
+    in vec4 inValue;
+    in vec4 summands[maxSummandsCount];
+    out vec4 sum;
+    out vec4 outValue;
 
+    void main() {
+        sum = vec4( 0. );
+        for( int i = 0; i < summandsCount; i++ ) {
+            sum += summands[i];
+        }
+        sum /= 1000.;
+        outValue = inValue + sum;
+    }
+"""
+
+def buildShader( source, constants = {}, feedbackVaryings = [] ):
+
+    for name, value in constants.items():
+        source = re.sub( name, str( value ), source )
+    
     shader = glCreateShader( GL_VERTEX_SHADER )
-    glShaderSource( shader, re.sub( r"\bbaseCount\b", str( maxBaseLen ), vertex_shader ) )
+    glShaderSource( shader, source )
     glCompileShader( shader )
 
     if glGetShaderiv( shader, GL_COMPILE_STATUS ) != GL_TRUE:
         raise RuntimeError( glGetShaderInfoLog( shader ).decode() )
 
-    shaderProgram = glCreateProgram()
-    glAttachShader( shaderProgram, shader )
+    program = glCreateProgram()
+    glAttachShader( program, shader )
 
-    buff = ctypes.c_char_p( b"outValue" )
-    cBuff = ctypes.cast( ctypes.pointer( buff ), ctypes.POINTER( ctypes.POINTER( GLchar ) ) )
-    glTransformFeedbackVaryings( shaderProgram, 1, cBuff, GL_INTERLEAVED_ATTRIBS )
+    buff = ( ctypes.c_char_p * len( feedbackVaryings ) )()
+    buff[:] = [ string.encode( "utf-8" ) for string in feedbackVaryings ]
+    cBuff = ctypes.cast( buff, ctypes.POINTER( ctypes.POINTER( GLchar ) ) )
+    glTransformFeedbackVaryings( program, len( buff ), cBuff, GL_SEPARATE_ATTRIBS )
 
-    glLinkProgram( shaderProgram )
-    glUseProgram( shaderProgram )
+    glLinkProgram( program )
+    glUseProgram( program )
 
-    if glGetProgramiv( shaderProgram, GL_LINK_STATUS ) != GL_TRUE:
-        raise RuntimeError(  glGetProgramInfoLog( shaderProgram ).decode() )
+    if glGetProgramiv( program, GL_LINK_STATUS ) != GL_TRUE:
+        raise RuntimeError(  glGetProgramInfoLog( program ).decode() )
     
-    uniBase = glGetUniformLocation( shaderProgram, "base" )
-    uniCount = glGetUniformLocation( shaderProgram, "count" )
+    return program
+
+@pygamegltest.pygametest(name="Geometry Shader Test")
+def main( nPoints, nFrames ):
+
+    maxBaseCount = glGetInteger( GL_MAX_VERTEX_UNIFORM_VECTORS ) - 1
+    print( "maxBaseCount on this machine: " + str( maxBaseCount ) )
+
+    maxSummandsCount = glGetInteger( GL_MAX_VARYING_VECTORS ) - 1
+    print( "maxSummandsCount on this machine: " + str( maxSummandsCount ) )
+
+    summandsCount = int( np.ceil( nPoints / maxBaseCount ) )
+    assert summandsCount <= maxSummandsCount
+
+    # set up shader
+
+    shaderProgram = buildShader( shaderSource, { "maxBaseCount" : maxBaseCount }, [ "outValue" ] )
+    uniBaseCount = glGetUniformLocation( shaderProgram, "baseCount" )
+    baseIndex = glGetUniformBlockIndex( shaderProgram, "Base" )
 
     vao = glGenVertexArrays( 1 )
     glBindVertexArray( vao )
 
     data = np.arange( 3 * nPoints, dtype='float32' ).reshape( ( nPoints, 3 ) )
-    print( str( data[0] ) )
+    data = np.insert( data, 3, 0., axis = 1 )
     
     vbo = glGenBuffers( 1 )
     glBindBuffer( GL_ARRAY_BUFFER, vbo )
@@ -67,17 +104,35 @@ def main( nPoints, nFrames ):
 
     inputAttrib = glGetAttribLocation( shaderProgram, "inValue" )
     glEnableVertexAttribArray( inputAttrib )
-
-    # Note the need to cast 0 to a GLvoidp here!
-    glVertexAttribPointer( inputAttrib, 3, GL_FLOAT, GL_FALSE, 0, GLvoidp( 0 ) )
+    glVertexAttribPointer( inputAttrib, 4, GL_FLOAT, GL_FALSE, 0, GLvoidp( 0 ) )
     
-    nResults = int( np.ceil( nPoints / maxBaseLen ) )
-    feedback = np.empty( ( nResults, nPoints, 3 ), dtype = 'float32' )
+    summands = np.zeros( ( summandsCount, nPoints, 4 ), dtype = 'float32' )
 
     tbo = glGenBuffers( 1 )
+    glBindBuffer( GL_TRANSFORM_FEEDBACK_BUFFER, tbo )
+    glBufferData( GL_TRANSFORM_FEEDBACK_BUFFER, summands.nbytes, None, GL_DYNAMIC_READ )
+
+    # set up shader 2
+
+    shaderProgram2 = buildShader( shaderSource2, { "maxSummandsCount" : maxSummandsCount }, [ "sum", "outValue" ] )
+    uniSummandsCount = glGetUniformLocation( shaderProgram2, "summandsCount" )
+    glUniform1i( uniSummandsCount, summandsCount )
+
+    vao2 = glGenVertexArrays( 1 )
+    glBindVertexArray( vao2 )
+
+    glBindBuffer( GL_ARRAY_BUFFER, vbo )
+    inputAttrib = glGetAttribLocation( shaderProgram2, "inValue" )
+    glEnableVertexAttribArray( inputAttrib )
+    glVertexAttribPointer( inputAttrib, 4, GL_FLOAT, GL_FALSE, 0, GLvoidp( 0 ) )
+
     glBindBuffer( GL_ARRAY_BUFFER, tbo )
-    glBufferData( GL_ARRAY_BUFFER, feedback.nbytes, None, GL_DYNAMIC_READ )
-    glBindBufferBase( GL_TRANSFORM_FEEDBACK_BUFFER, 0, tbo )
+    for i in range( summandsCount ):
+        inputAttrib = glGetAttribLocation( shaderProgram2, "summands[" + str( i ) + "]" )
+        glEnableVertexAttribArray( inputAttrib )
+        glVertexAttribPointer( inputAttrib, 4, GL_FLOAT, GL_FALSE, 0, GLvoidp( summands[:i].nbytes ) )
+    
+    # run
 
     glEnable( GL_RASTERIZER_DISCARD )
 
@@ -88,57 +143,69 @@ def main( nPoints, nFrames ):
         return round( 1000 * ( tock - tick ), ndigits )
     
     np.set_printoptions( suppress = True )
+    print( str( data[0] ) )
 
     startTick = now()
     frameTick = startTick
 
     for _ in range( nFrames ):
     
-        glBindBuffer( GL_ARRAY_BUFFER, vbo )
-        glBufferSubData( GL_ARRAY_BUFFER, 0, data.nbytes, data )
-        uploadTick = now()
+        glUseProgram( shaderProgram )
+        glBindVertexArray( vao )
+        glBindBufferBase( GL_TRANSFORM_FEEDBACK_BUFFER, 0, tbo )
 
-        glBeginTransformFeedback(GL_POINTS)
-        for base in np.array_split( data, nResults ):
-            glUniform3fv( uniBase, base.shape[0], base )
-            glUniform1i( uniCount, base.shape[0] )
+        glBeginTransformFeedback( GL_POINTS )
+        offset = 0
+        for base in np.array_split( data, summandsCount ):
+            glUniform1i( uniBaseCount, base.shape[0] )
+            glUniformBlockBinding( shaderProgram, baseIndex, 0 )
+            glBindBufferRange( GL_UNIFORM_BUFFER, 0, vbo, offset, base.nbytes )
+            offset += base.nbytes
             glDrawArrays( GL_POINTS, 0, data.shape[0] )
         glEndTransformFeedback()
+        
+        glUseProgram( shaderProgram2 )
+        glBindVertexArray( vao2 )
+        glBindBufferBase( GL_TRANSFORM_FEEDBACK_BUFFER, 0, tbo )
+        glBindBufferBase( GL_TRANSFORM_FEEDBACK_BUFFER, 1, vbo )
+        
+        glBeginTransformFeedback( GL_POINTS )
+        glDrawArrays( GL_POINTS, 0, nPoints )
+        glEndTransformFeedback()
         glFlush()
+
         transmitTick = now()
 
         while ms( transmitTick, now() ) < 0:
             pass # do some stuff
         cpuTick = now()
 
-        glGetBufferSubData( GL_TRANSFORM_FEEDBACK_BUFFER, 0, feedback.nbytes, feedback.data )
+        glBindBuffer( GL_TRANSFORM_FEEDBACK_BUFFER, tbo )
+        glGetBufferSubData( GL_TRANSFORM_FEEDBACK_BUFFER, 0, summands[0].nbytes, summands.data )
+        print( str( summands[0,0,:3] ) )
+
+        glBindBuffer( GL_TRANSFORM_FEEDBACK_BUFFER, vbo )
+        glGetBufferSubData( GL_TRANSFORM_FEEDBACK_BUFFER, 0, data.nbytes, data.data )
+        print( str( data[0,:3] ), end = "\t" )
+
         feedbackTick = now()
 
-        delta = feedback.sum( axis = 0 ) / 1000
-        print( str( delta[0] ) )
-        data[:] += delta
-        print( str( data[0] ), end = "\t" )
-        sumTick = now()
-
-        uploadTime = ms( frameTick, uploadTick )
-        transmitTime = ms( uploadTick, transmitTick )
+        transmitTime = ms( frameTick, transmitTick )
         cpuTime = ms( transmitTick, cpuTick )
         feedbackTime = ms( cpuTick,  feedbackTick )
-        sumTime = ms( feedbackTick, sumTick )
 
         frameTock = now()
         frameTime = ms( frameTick, frameTock )
         frameTick = frameTock
 
-        print( str( uploadTime ) + " + " + str( transmitTime ) + " + " + str( cpuTime ) + " + " +
-               str( feedbackTime ) + " + " + str( sumTime ) + " ~= " + str( frameTime ) +
-               "ms (" + str( round( 1000 / frameTime, 1 ) ) + "fps)" )
+        print( str( transmitTime ) + " + " + str( cpuTime ) + " + " + str( feedbackTime ) +
+               " ~= " + str( frameTime ) + "ms (" + str( round( 1000 / frameTime, 1 ) ) + "fps)" )
     
     runTime = round( ms( startTick, now() ) / 1000, 3 )
     print( str( nFrames ) + " frames / " + str( runTime ) + "s = ~" + str( round( nFrames / runTime, 1 ) ) + "fps" )
-    print( "rendered in " + str( nResults ) + " chunks per frame" )
-    print( "maxBaseLen: " + str( maxBaseLen ) )
-    print( "feedback shape: " + str( feedback.shape ) )
+    print( "rendered in " + str( summandsCount ) + " chunks per frame" )
+    print( "maxBaseCount: " + str( maxBaseCount ) )
+    print( "summands shape: " + str( summands.shape ) )
 
 if __name__ == "__main__":
     nPoints = int( sys.argv[1] ) if len( sys.argv ) > 1 else 5000
